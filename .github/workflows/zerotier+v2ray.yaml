@@ -1,0 +1,53 @@
+name: ZeroTier+UpUp
+
+# 注意事项：
+# 1. 应当指定每个任务的持续时间和开始时间，例如设置 schedule.cron 属性让任务每个小时自动运行一次，每次运行时间 60分钟 （由 "Start UpUp" 中的 timeout-minutes 指定）
+# 2. 应当确保 IP_ASSIGNMENT
+
+on:
+  workflow_dispatch:
+  # 取消注释以启用定时任务（默认每小时），具体生成可参考 https://www.freeformatter.com/cron-expression-generator-quartz.html
+  # schedule:
+  #  - cron: '23 */6 * * *'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Install ZeroTier
+        run: |
+          curl -s https://install.zerotier.com | sudo bash
+          sudo zerotier-cli info
+
+      - name: Start ZeroTier
+        env:
+          # 如果修改了 IP_ASSIGNMENT，那么对于 clash 配置的服务器地址也应当同步。
+          IP_ASSIGNMENT: 10.147.19.253
+          ZEROTIER_NETWORK_ID: ${{ secrets.ZEROTIER_NETWORK_ID }}
+          ZEROTIER_TOKEN: ${{ secrets.ZEROTIER_TOKEN }}
+        run: |
+          memberId=$(sudo zerotier-cli info | awk -F" " '{print $3}')
+          echo "Member Id is ${memberId}"
+          curl -X POST -H "Content-Type: application/json" -H "Authorization: token ${ZEROTIER_TOKEN}" -d "{\"config\": { \"ipAssignments\": [ \"$IP_ASSIGNMENT\" ] }}" https://api.zerotier.com/api/v1/network/${ZEROTIER_NETWORK_ID}/member/${memberId}
+          sudo zerotier-cli join ${ZEROTIER_NETWORK_ID}
+
+      - name: Start UpUp
+        timeout-minutes: 359
+        env:
+          UpUp_CONFIG_JSON: ${{ secrets.UpUp_CONFIG_JSON }}
+        run: |
+          echo $UpUp_CONFIG_JSON > UpUp-runtime-config.json
+          docker run --network=host --name UpUp -v ${{ github.workspace }}/UpUp-runtime-config.json:/etc/v2fly/config.json -p 10086:10086 v2fly/v2fly-core run -c /etc/v2fly/config.json
+
+      - name: Immediately Cleanup
+        if: always()
+        env:
+          ZEROTIER_NETWORK_ID: ${{ secrets.ZEROTIER_NETWORK_ID }}
+          ZEROTIER_TOKEN: ${{ secrets.ZEROTIER_TOKEN }}
+        # https://docs.zerotier.com/central/v1/#operation/deleteNetworkMember
+        run: |
+          memberId=$(sudo zerotier-cli info | awk -F" " '{print $3}')
+          curl -X DELETE -H "Authorization: token ${ZEROTIER_TOKEN}" https://api.zerotier.com/api/v1/network/${ZEROTIER_NETWORK_ID}/member/${memberId}
